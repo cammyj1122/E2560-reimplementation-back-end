@@ -242,7 +242,7 @@ module ImportableExportableHelper
   #
   # Duplicate objects are collected and returned.
   # --------------------------------------------------------------
-  def try_import_records(file, headers, use_header: false)
+  def try_import_records(file, headers, use_header: true)
     temp_file = 'output.csv'
     csv_file = CSV.read(file)
 
@@ -251,7 +251,8 @@ module ImportableExportableHelper
       if use_header
         headers = csv_file.shift.map { |h| h.parameterize.underscore }
       else
-        headers = headers.map { |header| header.parameterize.underscore }
+        # 'headers' is already passed into the method as the correct ordered_fields
+        headers = headers.map { |h| h.parameterize.underscore }
       end
 
       csv << headers
@@ -378,18 +379,12 @@ module ImportableExportableHelper
   # --------------------------------------------------------------
   def save_object(created_object)
     created_object.save!
+    true
   rescue ActiveRecord::RecordInvalid => e
-    # Check if a specific attribute has a :uniqueness error
-    puts "Validation error: #{e.message}"
-
-    unless created_object.errors.details[:attribute_name].any? { |detail| detail[:error] == :uniqueness }
-      raise StandardError.new(e.message)
-    end
-
-    puts 'Uniqueness violation on attribute_name!'
-    created_object
+    puts "VALIDATION FAILED: #{created_object.errors.full_messages}"
+    raise e
   rescue ActiveRecord::RecordNotUnique => e
-    puts "Unique constraint violation: #{e.message}"
+    puts "UNIQUE CONSTRAINT FAILED: #{e.message}"
     created_object
   end
 end

@@ -2,20 +2,21 @@
 
 class User < ApplicationRecord
   extend ImportableExportableHelper
-  mandatory_fields :name, :email, :password, :full_name
-  external_classes ExternalClass.new(Role, true, false, :name),
-                   ExternalClass.new(Institution, true, false, :name)
 
+  # FIX 1: use password_digest
+  mandatory_fields :name, :email, :password_digest, :full_name
+
+  # FIX 3: match CSV lookups
+  external_classes ExternalClass.new(Role, true, false, :id),
+                   ExternalClass.new(Institution, true, false, :id)
 
   has_secure_password
-  after_initialize :set_defaults
 
+  # FIX 2: allow_nil for imports
+  validates :password, length: { minimum: 6 }, allow_nil: true
 
-  # name must be lowercase and unique
-  validates :name, presence: true, uniqueness: true, allow_blank: false
-                   # format: { with: /\A[a-z]+\z/, message: 'must be in lowercase' }
+  validates :name, presence: true, uniqueness: true
   validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }
-  validates :password, length: { minimum: 6 }, presence: true, allow_nil: true
   validates :full_name, presence: true, length: { maximum: 50 }
 
   belongs_to :role
