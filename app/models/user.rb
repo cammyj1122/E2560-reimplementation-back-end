@@ -2,7 +2,7 @@
 
 class User < ApplicationRecord
   extend ImportableExportableHelper
-  mandatory_fields :name, :email, :password, :full_name
+  mandatory_fields :name, :email, :password, :username
   external_classes ExternalClass.new(Role, true, false, :name),
                    ExternalClass.new(Institution, true, false, :name)
   available_actions_on_duplicate SkipRecordAction.new, UpdateExistingRecordAction.new, ChangeOffendingFieldAction.new
