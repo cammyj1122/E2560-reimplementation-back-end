@@ -2,14 +2,15 @@
 
 class Item < ApplicationRecord
   extend ImportableExportableHelper
-  mandatory_fields :txt, :weight, :seq, :question_type, :break_before
-  external_classes ExternalClass.new(Questionnaire, true, false, :name),
-                   ExternalClass.new(QuestionAdvice, false, true)
-
-
+  mandatory_fields :txt, :weight, :seq, :question_type, :break_before, :questionnaire_name
+  hidden_fields :id, :created_at, :updated_at
+  external_classes ExternalClass.new(Questionnaire, true, false, :name)
+  filter nil
   before_create :set_seq
   belongs_to :questionnaire # each item belongs to a specific questionnaire
   has_many :answers, dependent: :destroy, foreign_key: 'item_id'
+  # Lets package export include template scoring advice.
+  has_many :question_advices, dependent: :destroy, foreign_key: 'item_id'
   attr_accessor :choice_strategy
   
   validates :seq, presence: true, numericality: true # sequence must be numeric
@@ -60,6 +61,24 @@ class Item < ApplicationRecord
   # Use strategy to validate the item
   def validate_item
     strategy.validate(self)
+  end
+
+  def max_score
+    weight
+  end
+
+  def self.for(record)
+    klass = case record.question_type
+            when 'Criterion'
+              Criterion
+            when 'Scale'
+              Scale
+            else
+              Item
+            end
+
+    # Cast the existing record to the desired subclass
+    klass.new(record.attributes)
   end
 
   def max_score

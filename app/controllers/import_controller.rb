@@ -14,6 +14,17 @@
 #
 
 class ImportController < ApplicationController
+  SUPPORTED_IMPORT_CLASSES = {
+    "User" => User,
+    "Team" => Team,
+    "CourseParticipant" => CourseParticipant,
+    "AssignmentParticipant" => AssignmentParticipant,
+    "ProjectTopic" => ProjectTopic,
+    "Questionnaire" => Questionnaire,
+    "Item" => Item,
+    "QuestionAdvice" => QuestionAdvice
+  }.freeze
+
   # Ensure strong parameters are processed before each action
   before_action :import_params
 
@@ -24,16 +35,11 @@ class ImportController < ApplicationController
   # The frontend uses this to build the mapping UI (drag/drop field matching).
   #
   def index
-    imported_class = params[:class].constantize
+    imported_class = resolve_import_class!(params[:class])
 
-    render json: {
-      mandatory_fields: imported_class.mandatory_fields,
-      optional_fields: imported_class.optional_fields,
-      external_fields: imported_class.external_fields,
-
-      # Import does not provide duplicate-resolution strategies (those apply to export)
-      available_actions_on_dup: imported_class.available_actions_on_duplicate.map{|klass| klass.class.name},
-    }, status: :ok
+    render json: import_metadata_for(imported_class), status: :ok
+  rescue ArgumentError => e
+    render json: { error: e.message }, status: :unprocessable_entity
   end
 
   ##
@@ -55,19 +61,35 @@ class ImportController < ApplicationController
     ordered_fields = JSON.parse(params[:ordered_fields]) if params[:ordered_fields]
 
     # Dynamically load the model class (e.g., "User", "Team", etc.)
-    klass = params[:class].constantize
+    klass = resolve_import_class!(params[:class])
+    defaults = import_defaults_for(klass)
 
     # Load the chosen duplicate action (Skip, Update, Change)
-    dup_action = params[:dup_action].constantize
+    dup_action = params[:dup_action]&.constantize
 
-    pp dup_action
-
-    importService = Import.new(klass: klass, file: uploaded_file, headers: ordered_fields, dup_action: dup_action.new)
-    result = importService.perform(use_headers)
+    # AssignmentParticipant import is assignment-scoped and uses username lookup
+    # rather than the generic table-column importer behavior.
+    result = if klass == AssignmentParticipant
+               AssignmentParticipant.with_assignment_context(params[:assignment_id], current_user) do
+                 Import.new(klass: klass, file: uploaded_file, headers: ordered_fields, dup_action: dup_action&.new, defaults: defaults).perform(use_headers)
+               end
+             elsif klass == CourseParticipant
+               CourseParticipant.with_course_context(params[:course_id], current_user) do
+                 Import.new(klass: klass, file: uploaded_file, headers: ordered_fields, dup_action: dup_action&.new, defaults: defaults).perform(use_headers)
+               end
+             elsif klass == ProjectTopic
+               ProjectTopic.with_assignment_context(params[:assignment_id]) do
+                 Import.new(klass: klass, file: uploaded_file, headers: ordered_fields, dup_action: dup_action&.new, defaults: defaults).perform(use_headers)
+               end
+             else
+               Import.new(klass: klass, file: uploaded_file, headers: ordered_fields, dup_action: dup_action&.new, defaults: defaults).perform(use_headers)
+             end
 
     # If no exceptions occur, return success
     render json: { message: "#{klass.name} has been imported!", **result }, status: :created
 
+  rescue ArgumentError => e
+    render json: { error: e.message }, status: :unprocessable_entity
   rescue StandardError => e
     # Catch any unexpected runtime errors
     puts "An unexpected error occurred during import: #{e.message}"
@@ -81,6 +103,89 @@ class ImportController < ApplicationController
   # Strong parameters for import operations
   #
   def import_params
-    params.permit(:csv_file, :use_headers, :class, :ordered_fields, :dup_action)
+    params.permit(:csv_file, :use_headers, :class, :ordered_fields, :dup_action, :assignment_id, :course_id)
+  end
+
+  def import_defaults_for(klass)
+    return team_import_defaults if klass == Team
+    return project_topic_import_defaults if klass == ProjectTopic
+    return {} unless klass == User && current_user.present?
+
+    {
+      parent_id: current_user.id,
+      institution_id: current_user.institution_id
+    }
+  end
+
+  def import_metadata_for(imported_class)
+    # Provide the username-only field list while preserving the shared import
+    # modal flow used by other importable models.
+    if imported_class == AssignmentParticipant
+      AssignmentParticipant.with_assignment_context(params[:assignment_id], current_user) do
+        return {
+          mandatory_fields: imported_class.mandatory_fields,
+          optional_fields: imported_class.optional_fields,
+          external_fields: imported_class.external_fields,
+          available_actions_on_dup: imported_class.available_actions_on_duplicate.map { |klass| klass.class.name }
+        }
+      end
+    end
+
+    if imported_class == CourseParticipant
+      CourseParticipant.with_course_context(params[:course_id], current_user) do
+        return {
+          mandatory_fields: imported_class.mandatory_fields,
+          optional_fields: imported_class.optional_fields,
+          external_fields: imported_class.external_fields,
+          available_actions_on_dup: imported_class.available_actions_on_duplicate.map { |klass| klass.class.name }
+        }
+      end
+    end
+
+    if imported_class == Team
+      Team.with_assignment_context(params[:assignment_id]) do
+        return {
+          mandatory_fields: imported_class.mandatory_fields,
+          optional_fields: imported_class.optional_fields,
+          external_fields: imported_class.external_fields,
+          available_actions_on_dup: imported_class.available_actions_on_duplicate.map { |klass| klass.class.name }
+        }
+      end
+    end
+
+    if imported_class == ProjectTopic
+      ProjectTopic.with_assignment_context(params[:assignment_id]) do
+        return {
+          mandatory_fields: imported_class.mandatory_fields,
+          optional_fields: imported_class.optional_fields,
+          external_fields: imported_class.external_fields,
+          available_actions_on_dup: imported_class.available_actions_on_duplicate.map { |klass| klass.class.name }
+        }
+      end
+    end
+
+    {
+      mandatory_fields: imported_class.mandatory_fields,
+      optional_fields: imported_class.optional_fields,
+      external_fields: imported_class.external_fields,
+      available_actions_on_dup: imported_class.available_actions_on_duplicate.map { |klass| klass.class.name }
+    }
+  end
+
+  def team_import_defaults
+    return {} if params[:assignment_id].blank?
+
+    { assignment_id: params[:assignment_id].to_i }
+  end
+
+  def project_topic_import_defaults
+    return {} if params[:assignment_id].blank?
+
+    { assignment_id: params[:assignment_id].to_i }
+  end
+
+  # Restricts imports to the explicit set of classes currently supported by the API.
+  def resolve_import_class!(name)
+    SUPPORTED_IMPORT_CLASSES[name.to_s] || raise(ArgumentError, "Unsupported import class: #{name}")
   end
 end

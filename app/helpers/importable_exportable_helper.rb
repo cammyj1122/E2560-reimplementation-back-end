@@ -147,15 +147,30 @@ module ImportableExportableHelper
     end
   end
 
+  ## Provide filter_proc with a custom method to aggregare records and spoof nonexistent models.
+  ##
+  def filter(filter_proc = nil)
+    @filter_method = filter_proc if filter_proc
+    @filter_method || -> { all }
+  end
+
   # --------------------------------------------------------------
   # Define or retrieve mandatory fields.
   # These must be present in the CSV.
   # --------------------------------------------------------------
   def mandatory_fields(*fields)
     if fields.any?
-      @mandatory_fields = fields.map(&:to_s)
+      @mandatory_fields = fields.map(&:to_s) - hidden_fields
     else
       @mandatory_fields
+    end
+  end
+
+  def hidden_fields(*fields)
+    if fields.any?
+      @hidden_fields = fields.map(&:to_s)
+    else
+      @hidden_fields || []
     end
   end
 
@@ -163,7 +178,11 @@ module ImportableExportableHelper
   # Optional = internal fields - mandatory
   # --------------------------------------------------------------
   def optional_fields
-    internal_fields - mandatory_fields
+    unhidden_fields - (mandatory_fields || [])
+  end
+
+  def unhidden_fields
+    internal_fields - (hidden_fields || [])
   end
 
   # --------------------------------------------------------------
@@ -176,7 +195,7 @@ module ImportableExportableHelper
     if fields.any?
       @external_classes = fields
     else
-      @external_classes
+      @external_classes || []
     end
   end
 
@@ -190,7 +209,7 @@ module ImportableExportableHelper
     if fields.any?
       @available_actions_on_duplicate = fields
     else
-      @available_actions_on_duplicate
+      @available_actions_on_duplicate || []
     end
   end
 
@@ -204,7 +223,7 @@ module ImportableExportableHelper
   # Then external fields are removed (to prevent duplication).
   # --------------------------------------------------------------
   def internal_fields
-    (column_names + (mandatory_fields || [])).uniq - external_fields
+    (column_names + (mandatory_fields || [])).uniq - external_fields - hidden_fields
   end
 
   # --------------------------------------------------------------
@@ -253,7 +272,7 @@ module ImportableExportableHelper
   #
   # Duplicate objects are collected and returned.
   # --------------------------------------------------------------
-  def try_import_records(file, headers, use_header)
+  def try_import_records(file, headers, use_header, defaults = {})
     temp_file = 'output.csv'
     csv_file = CSV.read(file)
 
@@ -280,11 +299,12 @@ module ImportableExportableHelper
 
     ActiveRecord::Base.transaction do
       temp_contents.each do |row|
-        dup = import_row(row, mapping)
+        dup = import_row(row, mapping, defaults)
         duplicate_records << dup if dup && dup != true
       end
 
-      rescue StandardError
+      rescue StandardError => e
+        puts e.message
         raise ActiveRecord::Rollback
     end
 
@@ -305,7 +325,7 @@ module ImportableExportableHelper
   #   • true if saved successfully
   #   • duplicate object if duplicate occurred
   # --------------------------------------------------------------
-  def import_row(row, mapping)
+  def import_row(row, mapping, defaults = {})
 
     # Build row_hash where each key maps to all found values
     row_hash = {}
@@ -317,6 +337,12 @@ module ImportableExportableHelper
     # Create object for this class
     current_class_attrs = row_hash.slice(*internal_fields)
     created_object = from_hash(current_class_attrs)
+    defaults.compact.each do |field, value|
+      next unless created_object.respond_to?(field)
+      next if created_object.public_send(field).present?
+
+      created_object.public_send("#{field}=", value)
+    end
 
     # for each external class, try to look them up
     external_classes&.each do |external_class|
@@ -326,11 +352,13 @@ module ImportableExportableHelper
     duplicate = save_object(created_object)
     return duplicate if duplicate && duplicate != true
 
-    return unless external_classes
+    return true if external_classes.empty?
 
     external_classes.each do |external_class|
       create_external_class(row_hash, external_class, created_object)
     end
+
+    true
 
   end
 
